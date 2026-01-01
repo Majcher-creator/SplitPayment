@@ -328,8 +328,18 @@ def calculate_payouts(project_id: int, partners: List[str]) -> Dict[str, any]:
     # Get worked days for each partner
     worked_days = get_worked_days_by_partner(project_id, partners)
     
-    # Get scenario shares
-    shares = SCENARIOS[scenario]
+    # Get partner shares from database (or use scenario as fallback)
+    users_with_shares = get_all_users_with_shares()
+    partner_shares = {}
+    
+    if users_with_shares:
+        # Use dynamic shares from database
+        for user_name, user_share in users_with_shares:
+            partner_shares[user_name] = float(user_share)
+    else:
+        # Fallback to scenario shares if no users defined
+        shares = SCENARIOS.get(scenario, {})
+        partner_shares = shares
     
     # Calculate firm cut
     firm_cut = total_value * (FIRM_PERCENTAGE / 100)
@@ -338,10 +348,12 @@ def calculate_payouts(project_id: int, partners: List[str]) -> Dict[str, any]:
     # Calculate payouts
     payouts = {}
     for partner in partners:
-        # Only calculate if partner is in scenario
-        if partner in shares:
-            share_pct = shares[partner] / 100
-            days_worked = worked_days[partner]
+        # Get partner's share percentage
+        share_pct_value = partner_shares.get(partner, 0)
+        
+        if share_pct_value > 0:
+            share_pct = share_pct_value / 100
+            days_worked = worked_days.get(partner, 0)
             
             # Payout formula: share% * distributable / planned_days * worked_days
             if planned_days > 0:
@@ -352,7 +364,7 @@ def calculate_payouts(project_id: int, partners: List[str]) -> Dict[str, any]:
                 payout = 0
             
             payouts[partner] = {
-                "share_pct": shares[partner],
+                "share_pct": share_pct_value,
                 "worked_days": days_worked,
                 "payout": payout
             }
