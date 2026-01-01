@@ -8,22 +8,25 @@ import io
 # Database file path
 DB_FILE = "data.db"
 
-# Partner names
-PARTNERS = ["W1", "W2", "W3"]
+# Default partner names (can be customized by users)
+DEFAULT_PARTNERS = ["W1", "W2", "W3"]
 
 # Scenario definitions with share percentages
 SCENARIOS = {
-    "Scenario 1": {"W1": 40, "W2": 30, "W3": 30},
-    "Scenario 2": {"W1": 50, "W2": 25, "W3": 25},
-    "Scenario 3": {"W1": 33.33, "W2": 33.33, "W3": 33.34},
+    "Scenariusz 1": {"W1": 40, "W2": 30, "W3": 30},
+    "Scenariusz 2": {"W1": 50, "W2": 25, "W3": 25},
+    "Scenariusz 3": {"W1": 33.33, "W2": 33.33, "W3": 33.34},
 }
 
 # Firm percentage (taken from total before partner distribution)
 FIRM_PERCENTAGE = 3
 
+# Currency symbol
+CURRENCY = "zł"
+
 
 def init_db():
-    """Initialize the database with required tables."""
+    """Inicjalizacja bazy danych z wymaganymi tabelami."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -54,6 +57,15 @@ def init_db():
         )
     """)
     
+    # Create users/partners table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -64,7 +76,7 @@ def get_db_connection():
 
 
 def create_project(name: str, proj_date: str, scenario: str, value: float, planned_days: int) -> int:
-    """Create a new project and return its ID."""
+    """Tworzenie nowego projektu i zwrócenie jego ID."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -81,8 +93,23 @@ def create_project(name: str, proj_date: str, scenario: str, value: float, plann
     return project_id
 
 
+def update_project_days(project_id: int, planned_days: int):
+    """Aktualizacja liczby planowanych dni projektu."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE projects
+        SET planned_days = ?
+        WHERE id = ?
+    """, (planned_days, project_id))
+    
+    conn.commit()
+    conn.close()
+
+
 def get_all_projects() -> List[Tuple]:
-    """Get all projects ordered by creation date descending."""
+    """Pobierz wszystkie projekty posortowane według daty utworzenia."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -99,7 +126,7 @@ def get_all_projects() -> List[Tuple]:
 
 
 def get_project_by_id(project_id: int) -> Tuple:
-    """Get a specific project by ID."""
+    """Pobierz konkretny projekt po ID."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -115,8 +142,54 @@ def get_project_by_id(project_id: int) -> Tuple:
     return project
 
 
+# User management functions
+def add_user(name: str):
+    """Dodaj nowego użytkownika/partnera."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    created_at = datetime.now().isoformat()
+    try:
+        cursor.execute("""
+            INSERT INTO users (name, created_at)
+            VALUES (?, ?)
+        """, (name, created_at))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def get_all_users() -> List[str]:
+    """Pobierz wszystkich użytkowników."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT name FROM users ORDER BY name")
+    users = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    
+    # If no users, return default partners
+    if not users:
+        return DEFAULT_PARTNERS
+    
+    return users
+
+
+def delete_user(name: str):
+    """Usuń użytkownika."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("DELETE FROM users WHERE name = ?", (name,))
+    conn.commit()
+    conn.close()
+
+
 def log_attendance(project_id: int, log_date: str, partner: str, present: int):
-    """Log attendance for a partner on a specific date. Last write wins."""
+    """Rejestrowanie obecności partnera w określonym dniu. Ostatni zapis nadpisuje poprzedni."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -132,7 +205,7 @@ def log_attendance(project_id: int, log_date: str, partner: str, present: int):
 
 
 def get_worklog_for_project(project_id: int) -> List[Tuple]:
-    """Get all worklog entries for a project."""
+    """Pobierz wszystkie wpisy dziennika pracy dla projektu."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -149,14 +222,14 @@ def get_worklog_for_project(project_id: int) -> List[Tuple]:
     return logs
 
 
-def get_worked_days_by_partner(project_id: int) -> Dict[str, int]:
-    """Get total worked days (present=1) for each partner in a project."""
+def get_worked_days_by_partner(project_id: int, partners: List[str]) -> Dict[str, int]:
+    """Pobierz całkowitą liczbę przepracowanych dni (obecność=1) dla każdego partnera w projekcie."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    worked_days = {partner: 0 for partner in PARTNERS}
+    worked_days = {partner: 0 for partner in partners}
     
-    for partner in PARTNERS:
+    for partner in partners:
         cursor.execute("""
             SELECT COUNT(*) FROM worklog
             WHERE project_id = ? AND partner = ? AND present = 1
@@ -170,12 +243,12 @@ def get_worked_days_by_partner(project_id: int) -> Dict[str, int]:
     return worked_days
 
 
-def calculate_payouts(project_id: int) -> Dict[str, any]:
-    """Calculate payouts for a project based on worked days."""
+def calculate_payouts(project_id: int, partners: List[str]) -> Dict[str, any]:
+    """Obliczanie wypłat dla projektu na podstawie przepracowanych dni."""
     project = get_project_by_id(project_id)
     if not project:
         return {
-            "error": "Project not found",
+            "error": "Nie znaleziono projektu",
             "project_name": "",
             "total_value": 0,
             "firm_cut": 0,
@@ -191,7 +264,7 @@ def calculate_payouts(project_id: int) -> Dict[str, any]:
     _, name, proj_date, scenario, total_value, planned_days, _ = project
     
     # Get worked days for each partner
-    worked_days = get_worked_days_by_partner(project_id)
+    worked_days = get_worked_days_by_partner(project_id, partners)
     
     # Get scenario shares
     shares = SCENARIOS[scenario]
@@ -202,23 +275,25 @@ def calculate_payouts(project_id: int) -> Dict[str, any]:
     
     # Calculate payouts
     payouts = {}
-    for partner in PARTNERS:
-        share_pct = shares[partner] / 100
-        days_worked = worked_days[partner]
-        
-        # Payout formula: share% * distributable / planned_days * worked_days
-        if planned_days > 0:
-            per_day_value = distributable / planned_days
-            partner_per_day = share_pct * per_day_value
-            payout = partner_per_day * days_worked
-        else:
-            payout = 0
-        
-        payouts[partner] = {
-            "share_pct": shares[partner],
-            "worked_days": days_worked,
-            "payout": payout
-        }
+    for partner in partners:
+        # Only calculate if partner is in scenario
+        if partner in shares:
+            share_pct = shares[partner] / 100
+            days_worked = worked_days[partner]
+            
+            # Payout formula: share% * distributable / planned_days * worked_days
+            if planned_days > 0:
+                per_day_value = distributable / planned_days
+                partner_per_day = share_pct * per_day_value
+                payout = partner_per_day * days_worked
+            else:
+                payout = 0
+            
+            payouts[partner] = {
+                "share_pct": shares[partner],
+                "worked_days": days_worked,
+                "payout": payout
+            }
     
     total_paid = sum(p["payout"] for p in payouts.values())
     remaining = distributable - total_paid
@@ -239,7 +314,7 @@ def calculate_payouts(project_id: int) -> Dict[str, any]:
 
 
 def get_monthly_summary() -> pd.DataFrame:
-    """Get monthly summary of projects."""
+    """Pobierz miesięczne podsumowanie projektów."""
     conn = get_db_connection()
     
     query = """
@@ -260,7 +335,7 @@ def get_monthly_summary() -> pd.DataFrame:
 
 
 def get_yearly_summary() -> pd.DataFrame:
-    """Get yearly summary of projects."""
+    """Pobierz roczne podsumowanie projektów."""
     conn = get_db_connection()
     
     query = """
@@ -281,7 +356,7 @@ def get_yearly_summary() -> pd.DataFrame:
 
 
 def export_projects_csv() -> str:
-    """Export all projects to CSV format."""
+    """Eksport wszystkich projektów do formatu CSV."""
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM projects ORDER BY created_at DESC", conn)
     conn.close()
@@ -290,7 +365,7 @@ def export_projects_csv() -> str:
 
 
 def export_worklog_csv() -> str:
-    """Export worklog with project details to CSV format."""
+    """Eksport dziennika pracy ze szczegółami projektu do formatu CSV."""
     conn = get_db_connection()
     
     query = """
@@ -315,7 +390,7 @@ def export_worklog_csv() -> str:
 
 
 def main():
-    st.set_page_config(page_title="Project Settlement App", layout="wide")
+    st.set_page_config(page_title="System Rozliczeń Projektów", layout="wide")
     
     # Initialize database
     init_db()
@@ -324,215 +399,279 @@ def main():
     if "current_project_id" not in st.session_state:
         st.session_state.current_project_id = None
     
-    st.title("💰 Project Settlement & Time Tracking")
+    st.title("💰 System Rozliczeń Projektów i Śledzenia Czasu")
     
-    # Sidebar for project management
-    with st.sidebar:
-        st.header("Project Management")
+    # Get current users list
+    partners = get_all_users()
+    
+    # Create tabs for main sections
+    tab_projects, tab_users = st.tabs(["Projekty", "Zarządzanie Użytkownikami"])
+    
+    with tab_users:
+        st.header("👥 Zarządzanie Użytkownikami/Partnerami")
         
-        # Create new project
-        with st.expander("➕ Create New Project", expanded=False):
-            with st.form("create_project_form"):
-                proj_name = st.text_input("Project Name", placeholder="Enter project name")
-                proj_date = st.date_input("Project Date", value=date.today())
-                
-                scenario = st.selectbox("Scenario", options=list(SCENARIOS.keys()))
-                
-                # Show scenario details
-                st.caption(f"**{scenario} Distribution:**")
-                for partner, share in SCENARIOS[scenario].items():
-                    st.caption(f"  {partner}: {share}%")
-                
-                proj_value = st.number_input("Total Value ($)", min_value=0.0, value=1000.0, step=100.0)
-                planned_days = st.number_input("Planned Days", min_value=1, value=10, step=1)
-                
-                submitted = st.form_submit_button("Create Project")
-                
-                if submitted:
-                    if proj_name.strip():
-                        project_id = create_project(
-                            proj_name.strip(),
-                            proj_date.isoformat(),
-                            scenario,
-                            proj_value,
-                            planned_days
-                        )
-                        st.session_state.current_project_id = project_id
-                        st.success(f"✅ Project '{proj_name}' created!")
-                        st.rerun()
-                    else:
-                        st.error("Please enter a project name")
-        
-        # Select existing project
-        st.subheader("📋 Recent Projects")
-        projects = get_all_projects()
-        
-        if projects:
-            project_options = {f"{p[1]} ({p[2]})": p[0] for p in projects}
-            
-            selected_project_label = st.selectbox(
-                "Select Project",
-                options=list(project_options.keys()),
-                index=0 if st.session_state.current_project_id is None else 
-                      list(project_options.values()).index(st.session_state.current_project_id) 
-                      if st.session_state.current_project_id in project_options.values() else 0
-            )
-            
-            if st.button("Load Selected Project"):
-                st.session_state.current_project_id = project_options[selected_project_label]
-                st.rerun()
-        else:
-            st.info("No projects yet. Create one above!")
-    
-    # Main content area
-    if st.session_state.current_project_id:
-        project = get_project_by_id(st.session_state.current_project_id)
-        
-        if project:
-            _, proj_name, proj_date, scenario, value, planned_days, _ = project
-            
-            st.header(f"📊 Current Project: {proj_name}")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Value", f"${value:,.2f}")
-            with col2:
-                st.metric("Scenario", scenario)
-            with col3:
-                st.metric("Planned Days", planned_days)
-            with col4:
-                st.metric("Date", proj_date)
-            
-            st.divider()
-            
-            # Attendance Logging
-            st.subheader("⏱️ Log Attendance")
-            
-            col_left, col_right = st.columns([1, 1])
-            
-            with col_left:
-                with st.form("attendance_form"):
-                    log_date = st.date_input("Date", value=date.today())
-                    
-                    st.write("**Partner Attendance:**")
-                    attendance = {}
-                    for partner in PARTNERS:
-                        attendance[partner] = st.checkbox(f"{partner} - Present", value=True, key=f"attend_{partner}")
-                    
-                    log_submitted = st.form_submit_button("💾 Save Attendance")
-                    
-                    if log_submitted:
-                        for partner, present in attendance.items():
-                            log_attendance(
-                                st.session_state.current_project_id,
-                                log_date.isoformat(),
-                                partner,
-                                1 if present else 0
-                            )
-                        st.success(f"✅ Attendance logged for {log_date}")
-                        st.rerun()
-            
-            with col_right:
-                st.write("**Recent Attendance Logs:**")
-                logs = get_worklog_for_project(st.session_state.current_project_id)
-                
-                if logs:
-                    log_df = pd.DataFrame(logs, columns=["ID", "Project ID", "Date", "Partner", "Present", "Logged At"])
-                    log_df["Status"] = log_df["Present"].apply(lambda x: "✅ Present" if x == 1 else "❌ Absent")
-                    display_df = log_df[["Date", "Partner", "Status"]].head(10)
-                    st.dataframe(display_df, hide_index=True, use_container_width=True)
-                else:
-                    st.info("No attendance logs yet")
-            
-            st.divider()
-            
-            # Payout Calculation
-            st.subheader("💵 Payout Calculation")
-            
-            payout_data = calculate_payouts(st.session_state.current_project_id)
-            
-            if payout_data:
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Firm Cut (3%)", f"${payout_data['firm_cut']:,.2f}")
-                with col2:
-                    st.metric("Distributable", f"${payout_data['distributable']:,.2f}")
-                with col3:
-                    st.metric("Total Paid", f"${payout_data['total_paid']:,.2f}")
-                with col4:
-                    st.metric("Remaining", f"${payout_data['remaining']:,.2f}")
-                
-                if payout_data['over_plan']:
-                    st.warning(f"⚠️ Total worked days ({payout_data['total_worked_days']}) exceeds planned days ({payout_data['planned_days']})")
-                
-                # Payout table
-                st.write("**Partner Payouts:**")
-                payout_rows = []
-                for partner in PARTNERS:
-                    p_data = payout_data['payouts'][partner]
-                    payout_rows.append({
-                        "Partner": partner,
-                        "Share %": f"{p_data['share_pct']:.2f}%",
-                        "Worked Days": p_data['worked_days'],
-                        "Payout": f"${p_data['payout']:,.2f}"
-                    })
-                
-                payout_df = pd.DataFrame(payout_rows)
-                st.dataframe(payout_df, hide_index=True, use_container_width=True)
-    else:
-        st.info("👈 Please create or select a project from the sidebar to get started!")
-    
-    st.divider()
-    
-    # Summaries and Exports
-    st.header("📈 Summaries & Reports")
-    
-    tab1, tab2, tab3 = st.tabs(["Monthly Summary", "Yearly Summary", "Export Data"])
-    
-    with tab1:
-        st.subheader("Monthly Summary")
-        monthly_df = get_monthly_summary()
-        if not monthly_df.empty:
-            st.dataframe(monthly_df, hide_index=True, use_container_width=True)
-        else:
-            st.info("No data available")
-    
-    with tab2:
-        st.subheader("Yearly Summary")
-        yearly_df = get_yearly_summary()
-        if not yearly_df.empty:
-            st.dataframe(yearly_df, hide_index=True, use_container_width=True)
-        else:
-            st.info("No data available")
-    
-    with tab3:
-        st.subheader("Export Data")
-        
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.write("**Projects Data**")
-            projects_csv = export_projects_csv()
-            st.download_button(
-                label="📥 Download Projects CSV",
-                data=projects_csv,
-                file_name=f"projects_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+            st.subheader("Dodaj nowego użytkownika")
+            with st.form("add_user_form"):
+                new_user_name = st.text_input("Nazwa użytkownika", placeholder="np. W4, Jan Kowalski")
+                add_user_btn = st.form_submit_button("➕ Dodaj użytkownika")
+                
+                if add_user_btn:
+                    if new_user_name.strip():
+                        if add_user(new_user_name.strip()):
+                            st.success(f"✅ Dodano użytkownika: {new_user_name}")
+                            st.rerun()
+                        else:
+                            st.error("❌ Użytkownik o tej nazwie już istnieje")
+                    else:
+                        st.error("Proszę podać nazwę użytkownika")
         
         with col2:
-            st.write("**Worklog Data**")
-            worklog_csv = export_worklog_csv()
-            st.download_button(
-                label="📥 Download Worklog CSV",
-                data=worklog_csv,
-                file_name=f"worklog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+            st.subheader("Aktualni użytkownicy")
+            if partners:
+                for user in partners:
+                    col_name, col_del = st.columns([3, 1])
+                    with col_name:
+                        st.write(f"👤 {user}")
+                    with col_del:
+                        if st.button("🗑️", key=f"del_{user}"):
+                            delete_user(user)
+                            st.rerun()
+            else:
+                st.info("Brak zdefiniowanych użytkowników. Dodaj pierwszego!")
     
-    # Footer
-    st.divider()
-    st.caption("💡 **Tip:** Data is persisted in SQLite database (data.db)")
+    with tab_projects:
+        # Sidebar for project management
+        with st.sidebar:
+            st.header("Zarządzanie Projektami")
+        
+            # Create new project
+            with st.expander("➕ Utwórz Nowy Projekt", expanded=False):
+                with st.form("create_project_form"):
+                    proj_name = st.text_input("Nazwa Projektu", placeholder="Wprowadź nazwę projektu")
+                    proj_date = st.date_input("Data Projektu", value=date.today())
+                    
+                    scenario = st.selectbox("Scenariusz", options=list(SCENARIOS.keys()))
+                    
+                    # Show scenario details
+                    st.caption(f"**{scenario} - Podział:**")
+                    for partner, share in SCENARIOS[scenario].items():
+                        st.caption(f"  {partner}: {share}%")
+                    
+                    proj_value = st.number_input(f"Wartość Całkowita ({CURRENCY})", min_value=0.0, value=1000.0, step=100.0)
+                    planned_days = st.number_input("Planowane Dni", min_value=1, value=10, step=1)
+                    
+                    submitted = st.form_submit_button("Utwórz Projekt")
+                    
+                    if submitted:
+                        if proj_name.strip():
+                            project_id = create_project(
+                                proj_name.strip(),
+                                proj_date.isoformat(),
+                                scenario,
+                                proj_value,
+                                planned_days
+                            )
+                            st.session_state.current_project_id = project_id
+                            st.success(f"✅ Utworzono projekt '{proj_name}'!")
+                            st.rerun()
+                        else:
+                            st.error("Proszę wprowadzić nazwę projektu")
+            
+            # Select existing project
+            st.subheader("📋 Ostatnie Projekty")
+            projects = get_all_projects()
+            
+            if projects:
+                project_options = {f"{p[1]} ({p[2]})": p[0] for p in projects}
+                
+                selected_project_label = st.selectbox(
+                    "Wybierz Projekt",
+                    options=list(project_options.keys()),
+                    index=0 if st.session_state.current_project_id is None else 
+                          list(project_options.values()).index(st.session_state.current_project_id) 
+                          if st.session_state.current_project_id in project_options.values() else 0
+                )
+                
+                if st.button("Wczytaj Wybrany Projekt"):
+                    st.session_state.current_project_id = project_options[selected_project_label]
+                    st.rerun()
+            else:
+                st.info("Brak projektów. Utwórz nowy powyżej!")
+    
+        # Main content area
+        if st.session_state.current_project_id:
+            project = get_project_by_id(st.session_state.current_project_id)
+            
+            if project:
+                _, proj_name, proj_date, scenario, value, planned_days, _ = project
+                
+                st.header(f"📊 Aktualny Projekt: {proj_name}")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Wartość Całkowita", f"{value:,.2f} {CURRENCY}")
+                with col2:
+                    st.metric("Scenariusz", scenario)
+                with col3:
+                    # Editable planned days
+                    st.metric("Planowane Dni", planned_days)
+                with col4:
+                    st.metric("Data", proj_date)
+                
+                # Add edit planned days functionality
+                with st.expander("✏️ Edytuj liczbę planowanych dni"):
+                    with st.form("edit_days_form"):
+                        new_planned_days = st.number_input(
+                            "Nowa liczba planowanych dni", 
+                            min_value=1, 
+                            value=planned_days, 
+                            step=1
+                        )
+                        update_btn = st.form_submit_button("Aktualizuj")
+                        
+                        if update_btn:
+                            update_project_days(st.session_state.current_project_id, new_planned_days)
+                            st.success(f"✅ Zaktualizowano liczbę dni do {new_planned_days}")
+                            st.rerun()
+                
+                st.divider()
+                
+                # Attendance Logging
+                st.subheader("⏱️ Rejestrowanie Obecności")
+                
+                col_left, col_right = st.columns([1, 1])
+                
+                with col_left:
+                    with st.form("attendance_form"):
+                        log_date = st.date_input("Data", value=date.today())
+                        
+                        st.write("**Obecność Partnerów:**")
+                        attendance = {}
+                        for partner in partners:
+                            attendance[partner] = st.checkbox(f"{partner} - Obecny", value=True, key=f"attend_{partner}")
+                        
+                        log_submitted = st.form_submit_button("💾 Zapisz Obecność")
+                        
+                        if log_submitted:
+                            for partner, present in attendance.items():
+                                log_attendance(
+                                    st.session_state.current_project_id,
+                                    log_date.isoformat(),
+                                    partner,
+                                    1 if present else 0
+                                )
+                            st.success(f"✅ Zapisano obecność dla {log_date}")
+                            st.rerun()
+                
+                with col_right:
+                    st.write("**Ostatnie Wpisy Obecności:**")
+                    logs = get_worklog_for_project(st.session_state.current_project_id)
+                    
+                    if logs:
+                        log_df = pd.DataFrame(logs, columns=["ID", "ID Projektu", "Data", "Partner", "Obecny", "Zapisano"])
+                        log_df["Status"] = log_df["Obecny"].apply(lambda x: "✅ Obecny" if x == 1 else "❌ Nieobecny")
+                        display_df = log_df[["Data", "Partner", "Status"]].head(10)
+                        st.dataframe(display_df, hide_index=True, use_container_width=True)
+                    else:
+                        st.info("Brak wpisów obecności")
+                
+                st.divider()
+                
+                # Payout Calculation
+                st.subheader("💵 Obliczanie Wypłat")
+                
+                payout_data = calculate_payouts(st.session_state.current_project_id, partners)
+                
+                if payout_data:
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Opłata Firmy (3%)", f"{payout_data['firm_cut']:,.2f} {CURRENCY}")
+                    with col2:
+                        st.metric("Do Podziału", f"{payout_data['distributable']:,.2f} {CURRENCY}")
+                    with col3:
+                        st.metric("Całkowicie Wypłacone", f"{payout_data['total_paid']:,.2f} {CURRENCY}")
+                    with col4:
+                        st.metric("Pozostało", f"{payout_data['remaining']:,.2f} {CURRENCY}")
+                    
+                    if payout_data['over_plan']:
+                        st.warning(f"⚠️ Całkowita liczba przepracowanych dni ({payout_data['total_worked_days']}) przekracza planowane dni ({payout_data['planned_days']})")
+                    
+                    # Payout table
+                    st.write("**Wypłaty dla Partnerów:**")
+                    payout_rows = []
+                    for partner in partners:
+                        if partner in payout_data['payouts']:
+                            p_data = payout_data['payouts'][partner]
+                            payout_rows.append({
+                                "Partner": partner,
+                                "Udział %": f"{p_data['share_pct']:.2f}%",
+                                "Przepracowane Dni": p_data['worked_days'],
+                                "Wypłata": f"{p_data['payout']:,.2f} {CURRENCY}"
+                            })
+                    
+                    payout_df = pd.DataFrame(payout_rows)
+                    st.dataframe(payout_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("👈 Proszę utworzyć lub wybrać projekt z paska bocznego, aby rozpocząć!")
+        
+        st.divider()
+        
+        # Summaries and Exports
+        st.header("📈 Podsumowania i Raporty")
+        
+        tab1, tab2, tab3 = st.tabs(["Podsumowanie Miesięczne", "Podsumowanie Roczne", "Eksport Danych"])
+        
+        with tab1:
+            st.subheader("Podsumowanie Miesięczne")
+            monthly_df = get_monthly_summary()
+            if not monthly_df.empty:
+                # Rename columns to Polish
+                monthly_df.columns = ['Miesiąc', 'Liczba Projektów', f'Całkowita Wartość ({CURRENCY})', 'Całkowite Planowane Dni']
+                st.dataframe(monthly_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("Brak dostępnych danych")
+        
+        with tab2:
+            st.subheader("Podsumowanie Roczne")
+            yearly_df = get_yearly_summary()
+            if not yearly_df.empty:
+                # Rename columns to Polish
+                yearly_df.columns = ['Rok', 'Liczba Projektów', f'Całkowita Wartość ({CURRENCY})', 'Całkowite Planowane Dni']
+                st.dataframe(yearly_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("Brak dostępnych danych")
+        
+        with tab3:
+            st.subheader("Eksport Danych")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Dane Projektów**")
+                projects_csv = export_projects_csv()
+                st.download_button(
+                    label="📥 Pobierz CSV Projektów",
+                    data=projects_csv,
+                    file_name=f"projekty_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            
+            with col2:
+                st.write("**Dane Dziennika Pracy**")
+                worklog_csv = export_worklog_csv()
+                st.download_button(
+                    label="📥 Pobierz CSV Dziennika",
+                    data=worklog_csv,
+                    file_name=f"dziennik_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        
+        # Footer
+        st.divider()
+        st.caption("💡 **Wskazówka:** Dane są zapisywane w bazie danych SQLite (data.db)")
 
 
 if __name__ == "__main__":
