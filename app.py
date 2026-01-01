@@ -88,7 +88,7 @@ def init_db():
             scenario_id INTEGER NOT NULL,
             user_name TEXT NOT NULL,
             share_percentage REAL NOT NULL,
-            FOREIGN KEY (scenario_id) REFERENCES scenarios(id),
+            FOREIGN KEY (scenario_id) REFERENCES scenarios(id) ON DELETE CASCADE,
             UNIQUE(scenario_id, user_name)
         )
     """)
@@ -613,12 +613,38 @@ def import_scenarios_json(json_data: str) -> Tuple[bool, str]:
     try:
         scenarios_data = json.loads(json_data)
         
+        if not isinstance(scenarios_data, list):
+            return False, "Błąd importu: oczekiwano listy scenariuszy"
+        
         imported_count = 0
+        has_default = False
+        
         for scenario_data in scenarios_data:
             name = scenario_data.get("name")
+            
+            # Validate required fields
+            if not name or not isinstance(name, str) or not name.strip():
+                continue
+            
             description = scenario_data.get("description", "")
             is_default = 1 if scenario_data.get("is_default", False) else 0
             shares = scenario_data.get("shares", {})
+            
+            # Validate shares structure
+            if not isinstance(shares, dict):
+                continue
+            
+            # Validate shares values
+            try:
+                for partner, share_val in shares.items():
+                    if not isinstance(share_val, (int, float)) or share_val < 0:
+                        raise ValueError(f"Invalid share value for {partner}")
+            except (ValueError, TypeError):
+                continue
+            
+            # Track if we're setting a default
+            if is_default:
+                has_default = True
             
             # Check if scenario already exists
             existing = get_scenario_by_name(name)
@@ -638,7 +664,16 @@ def import_scenarios_json(json_data: str) -> Tuple[bool, str]:
             set_scenario_shares(scenario_id, shares)
             imported_count += 1
         
+        # If no default was imported, make sure at least one scenario is default
+        if imported_count > 0 and not has_default:
+            scenarios = get_all_scenarios()
+            if scenarios:
+                first_scenario_id = scenarios[0][0]
+                update_scenario(first_scenario_id, scenarios[0][1], scenarios[0][2], 1)
+        
         return True, f"Zaimportowano {imported_count} scenariuszy"
+    except json.JSONDecodeError as e:
+        return False, f"Błąd parsowania JSON: {str(e)}"
     except Exception as e:
         return False, f"Błąd importu: {str(e)}"
 
@@ -1020,7 +1055,7 @@ def main():
                     
                     with col_viz:
                         # Pie chart visualization
-                        if shares:
+                        if shares and any(v > 0 for v in shares.values()):
                             fig = px.pie(
                                 values=list(shares.values()),
                                 names=list(shares.keys()),
@@ -1029,6 +1064,8 @@ def main():
                             )
                             fig.update_traces(textposition='inside', textinfo='percent+label')
                             st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("Brak udziałów do wyświetlenia")
                     
                     st.divider()
                     
