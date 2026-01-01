@@ -57,11 +57,12 @@ def init_db():
         )
     """)
     
-    # Create users/partners table
+    # Create users/partners table with share information
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
+            share_percentage REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )
     """)
@@ -108,6 +109,36 @@ def update_project_days(project_id: int, planned_days: int):
     conn.close()
 
 
+def update_project(project_id: int, name: str, proj_date: str, scenario: str, value: float, planned_days: int):
+    """Aktualizacja pełnych danych projektu."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE projects
+        SET name = ?, date = ?, scenario = ?, value = ?, planned_days = ?
+        WHERE id = ?
+    """, (name, proj_date, scenario, value, planned_days, project_id))
+    
+    conn.commit()
+    conn.close()
+
+
+def delete_project(project_id: int):
+    """Usunięcie projektu i powiązanych danych."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Delete worklog entries first (foreign key constraint)
+    cursor.execute("DELETE FROM worklog WHERE project_id = ?", (project_id,))
+    
+    # Delete the project
+    cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    
+    conn.commit()
+    conn.close()
+
+
 def get_all_projects() -> List[Tuple]:
     """Pobierz wszystkie projekty posortowane według daty utworzenia."""
     conn = get_db_connection()
@@ -143,7 +174,7 @@ def get_project_by_id(project_id: int) -> Tuple:
 
 
 # User management functions
-def add_user(name: str):
+def add_user(name: str, share_percentage: float = 0):
     """Dodaj nowego użytkownika/partnera."""
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -151,9 +182,28 @@ def add_user(name: str):
     created_at = datetime.now().isoformat()
     try:
         cursor.execute("""
-            INSERT INTO users (name, created_at)
-            VALUES (?, ?)
-        """, (name, created_at))
+            INSERT INTO users (name, share_percentage, created_at)
+            VALUES (?, ?, ?)
+        """, (name, share_percentage, created_at))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def update_user(old_name: str, new_name: str, share_percentage: float):
+    """Aktualizuj dane użytkownika/partnera."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            UPDATE users
+            SET name = ?, share_percentage = ?
+            WHERE name = ?
+        """, (new_name, share_percentage, old_name))
         conn.commit()
         conn.close()
         return True
@@ -174,6 +224,18 @@ def get_all_users() -> List[str]:
     # If no users, return default partners
     if not users:
         return DEFAULT_PARTNERS
+    
+    return users
+
+
+def get_all_users_with_shares() -> List[Tuple]:
+    """Pobierz wszystkich użytkowników z ich udziałami."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT name, share_percentage FROM users ORDER BY name")
+    users = cursor.fetchall()
+    conn.close()
     
     return users
 
@@ -413,34 +475,51 @@ def main():
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.subheader("Dodaj nowego użytkownika")
+            st.subheader("Dodaj nowego partnera")
             with st.form("add_user_form"):
-                new_user_name = st.text_input("Nazwa użytkownika", placeholder="np. W4, Jan Kowalski")
-                add_user_btn = st.form_submit_button("➕ Dodaj użytkownika")
+                new_user_name = st.text_input("Nazwa partnera", placeholder="np. W4, Jan Kowalski")
+                new_user_share = st.number_input("Udział (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.01)
+                add_user_btn = st.form_submit_button("➕ Dodaj partnera")
                 
                 if add_user_btn:
                     if new_user_name.strip():
-                        if add_user(new_user_name.strip()):
-                            st.success(f"✅ Dodano użytkownika: {new_user_name}")
+                        if add_user(new_user_name.strip(), new_user_share):
+                            st.success(f"✅ Dodano partnera: {new_user_name} ({new_user_share}%)")
                             st.rerun()
                         else:
-                            st.error("❌ Użytkownik o tej nazwie już istnieje")
+                            st.error("❌ Partner o tej nazwie już istnieje")
                     else:
-                        st.error("Proszę podać nazwę użytkownika")
+                        st.error("Proszę podać nazwę partnera")
         
         with col2:
-            st.subheader("Aktualni użytkownicy")
-            if partners:
+            st.subheader("Aktualni partnerzy")
+            users_with_shares = get_all_users_with_shares()
+            if users_with_shares:
+                for user_name, user_share in users_with_shares:
+                    with st.expander(f"👤 {user_name} ({user_share}%)"):
+                        with st.form(f"edit_user_{user_name}"):
+                            edited_name = st.text_input("Nazwa", value=user_name, key=f"name_{user_name}")
+                            edited_share = st.number_input("Udział (%)", min_value=0.0, max_value=100.0, value=float(user_share), step=0.01, key=f"share_{user_name}")
+                            
+                            col_update, col_delete = st.columns(2)
+                            with col_update:
+                                if st.form_submit_button("💾 Aktualizuj"):
+                                    if update_user(user_name, edited_name.strip(), edited_share):
+                                        st.success(f"✅ Zaktualizowano partnera")
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Błąd aktualizacji (może istnieć partner o tej nazwie)")
+                            with col_delete:
+                                if st.form_submit_button("🗑️ Usuń"):
+                                    delete_user(user_name)
+                                    st.success(f"✅ Usunięto partnera {user_name}")
+                                    st.rerun()
+            elif partners:
+                # Show default partners without shares
                 for user in partners:
-                    col_name, col_del = st.columns([3, 1])
-                    with col_name:
-                        st.write(f"👤 {user}")
-                    with col_del:
-                        if st.button("🗑️", key=f"del_{user}"):
-                            delete_user(user)
-                            st.rerun()
+                    st.write(f"👤 {user} (domyślny)")
             else:
-                st.info("Brak zdefiniowanych użytkowników. Dodaj pierwszego!")
+                st.info("Brak zdefiniowanych partnerów. Dodaj pierwszego!")
     
     with tab_projects:
         # Sidebar for project management
@@ -521,21 +600,43 @@ def main():
                 with col4:
                     st.metric("Data", proj_date)
                 
-                # Add edit planned days functionality
-                with st.expander("✏️ Edytuj liczbę planowanych dni"):
-                    with st.form("edit_days_form"):
-                        new_planned_days = st.number_input(
-                            "Nowa liczba planowanych dni", 
-                            min_value=1, 
-                            value=planned_days, 
-                            step=1
-                        )
-                        update_btn = st.form_submit_button("Aktualizuj")
-                        
-                        if update_btn:
-                            update_project_days(st.session_state.current_project_id, new_planned_days)
-                            st.success(f"✅ Zaktualizowano liczbę dni do {new_planned_days}")
-                            st.rerun()
+                # Add edit and delete project functionality
+                col_edit, col_delete = st.columns(2)
+                
+                with col_edit:
+                    with st.expander("✏️ Edytuj projekt"):
+                        with st.form("edit_project_form"):
+                            edit_name = st.text_input("Nazwa projektu", value=proj_name)
+                            edit_date = st.date_input("Data projektu", value=datetime.fromisoformat(proj_date).date())
+                            edit_scenario = st.selectbox("Scenariusz", options=list(SCENARIOS.keys()), index=list(SCENARIOS.keys()).index(scenario))
+                            edit_value = st.number_input(f"Wartość całkowita ({CURRENCY})", min_value=0.0, value=float(value), step=100.0)
+                            edit_days = st.number_input("Planowane dni", min_value=1, value=planned_days, step=1)
+                            
+                            if st.form_submit_button("💾 Zapisz zmiany"):
+                                update_project(
+                                    st.session_state.current_project_id,
+                                    edit_name.strip(),
+                                    edit_date.isoformat(),
+                                    edit_scenario,
+                                    edit_value,
+                                    edit_days
+                                )
+                                st.success("✅ Projekt zaktualizowany!")
+                                st.rerun()
+                
+                with col_delete:
+                    with st.expander("🗑️ Usuń projekt"):
+                        st.warning("⚠️ Ta operacja jest nieodwracalna i usunie projekt wraz ze wszystkimi wpisami obecności!")
+                        with st.form("delete_project_form"):
+                            confirm_text = st.text_input("Wpisz 'USUŃ' aby potwierdzić:", placeholder="USUŃ")
+                            if st.form_submit_button("🗑️ Usuń projekt"):
+                                if confirm_text == "USUŃ":
+                                    delete_project(st.session_state.current_project_id)
+                                    st.session_state.current_project_id = None
+                                    st.success("✅ Projekt został usunięty")
+                                    st.rerun()
+                                else:
+                                    st.error("Nieprawidłowe potwierdzenie")
                 
                 st.divider()
                 
