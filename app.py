@@ -574,7 +574,7 @@ def main():
                         log_df = pd.DataFrame(logs, columns=["ID", "ID Projektu", "Data", "Partner", "Obecny", "Zapisano"])
                         log_df["Status"] = log_df["Obecny"].apply(lambda x: "✅ Obecny" if x == 1 else "❌ Nieobecny")
                         display_df = log_df[["Data", "Partner", "Status"]].head(10)
-                        st.dataframe(display_df, hide_index=True, use_container_width=True)
+                        st.dataframe(display_df, hide_index=True, width='stretch')
                     else:
                         st.info("Brak wpisów obecności")
                 
@@ -613,7 +613,7 @@ def main():
                             })
                     
                     payout_df = pd.DataFrame(payout_rows)
-                    st.dataframe(payout_df, hide_index=True, use_container_width=True)
+                    st.dataframe(payout_df, hide_index=True, width='stretch')
         else:
             st.info("👈 Proszę utworzyć lub wybrać projekt z paska bocznego, aby rozpocząć!")
         
@@ -630,7 +630,7 @@ def main():
             if not monthly_df.empty:
                 # Rename columns to Polish
                 monthly_df.columns = ['Miesiąc', 'Liczba Projektów', f'Całkowita Wartość ({CURRENCY})', 'Całkowite Planowane Dni']
-                st.dataframe(monthly_df, hide_index=True, use_container_width=True)
+                st.dataframe(monthly_df, hide_index=True, width='stretch')
             else:
                 st.info("Brak dostępnych danych")
         
@@ -640,7 +640,7 @@ def main():
             if not yearly_df.empty:
                 # Rename columns to Polish
                 yearly_df.columns = ['Rok', 'Liczba Projektów', f'Całkowita Wartość ({CURRENCY})', 'Całkowite Planowane Dni']
-                st.dataframe(yearly_df, hide_index=True, use_container_width=True)
+                st.dataframe(yearly_df, hide_index=True, width='stretch')
             else:
                 st.info("Brak dostępnych danych")
         
