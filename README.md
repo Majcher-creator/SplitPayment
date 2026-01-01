@@ -1,0 +1,2 @@
+# SplitPayment
+Kalkulator podzialu zyskow
