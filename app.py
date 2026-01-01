@@ -170,11 +170,23 @@ def get_worked_days_by_partner(project_id: int) -> Dict[str, int]:
     return worked_days
 
 
-def calculate_payouts(project_id: int) -> Dict:
+def calculate_payouts(project_id: int) -> Dict[str, any]:
     """Calculate payouts for a project based on worked days."""
     project = get_project_by_id(project_id)
     if not project:
-        return None
+        return {
+            "error": "Project not found",
+            "project_name": "",
+            "total_value": 0,
+            "firm_cut": 0,
+            "distributable": 0,
+            "planned_days": 0,
+            "total_worked_days": 0,
+            "payouts": {},
+            "total_paid": 0,
+            "remaining": 0,
+            "over_plan": False
+        }
     
     _, name, proj_date, scenario, total_value, planned_days, _ = project
     
@@ -195,7 +207,13 @@ def calculate_payouts(project_id: int) -> Dict:
         days_worked = worked_days[partner]
         
         # Payout formula: share% * distributable / planned_days * worked_days
-        payout = share_pct * distributable / planned_days * days_worked if planned_days > 0 else 0
+        if planned_days > 0:
+            per_day_value = distributable / planned_days
+            partner_per_day = share_pct * per_day_value
+            payout = partner_per_day * days_worked
+        else:
+            payout = 0
+        
         payouts[partner] = {
             "share_pct": shares[partner],
             "worked_days": days_worked,
@@ -442,7 +460,6 @@ def main():
                 with col3:
                     st.metric("Total Paid", f"${payout_data['total_paid']:,.2f}")
                 with col4:
-                    remaining_color = "normal" if payout_data['remaining'] >= 0 else "inverse"
                     st.metric("Remaining", f"${payout_data['remaining']:,.2f}")
                 
                 if payout_data['over_plan']:
