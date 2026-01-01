@@ -4,6 +4,8 @@ import pandas as pd
 from datetime import datetime, date
 from typing import List, Tuple, Dict
 import io
+import json
+import plotly.express as px
 
 # Database file path
 DB_FILE = "data.db"
@@ -67,7 +69,48 @@ def init_db():
         )
     """)
     
+    # Create scenarios table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scenarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            is_default INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Create scenario_shares table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scenario_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scenario_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            share_percentage REAL NOT NULL,
+            FOREIGN KEY (scenario_id) REFERENCES scenarios(id),
+            UNIQUE(scenario_id, user_name)
+        )
+    """)
+    
+    # Create audit_log table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER,
+            action TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
     conn.commit()
+    
+    # Migrate hardcoded scenarios if scenarios table is empty
+    migrate_hardcoded_scenarios(conn)
+    
     conn.close()
 
 
@@ -250,6 +293,356 @@ def delete_user(name: str):
     conn.close()
 
 
+# Scenario management functions
+def migrate_hardcoded_scenarios(conn):
+    """Migrate hardcoded scenarios to database on first run."""
+    cursor = conn.cursor()
+    
+    # Check if scenarios already exist
+    cursor.execute("SELECT COUNT(*) FROM scenarios")
+    count = cursor.fetchone()[0]
+    
+    if count == 0:
+        # Migrate hardcoded scenarios
+        now = datetime.now().isoformat()
+        
+        for idx, (scenario_name, shares) in enumerate(SCENARIOS.items()):
+            cursor.execute("""
+                INSERT INTO scenarios (name, description, is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (scenario_name, f"Zmigrowany scenariusz: {scenario_name}", 1 if idx == 0 else 0, now, now))
+            
+            scenario_id = cursor.lastrowid
+            
+            # Insert shares for this scenario
+            for user_name, share_pct in shares.items():
+                cursor.execute("""
+                    INSERT INTO scenario_shares (scenario_id, user_name, share_percentage)
+                    VALUES (?, ?, ?)
+                """, (scenario_id, user_name, share_pct))
+            
+            # Log the migration
+            log_audit(cursor, "scenario", scenario_id, "migrated", None, json.dumps(shares), now)
+        
+        conn.commit()
+
+
+def log_audit(cursor, entity_type: str, entity_id: int, action: str, old_value: str, new_value: str, timestamp: str = None):
+    """Log an audit entry."""
+    if timestamp is None:
+        timestamp = datetime.now().isoformat()
+    
+    cursor.execute("""
+        INSERT INTO audit_log (entity_type, entity_id, action, old_value, new_value, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (entity_type, entity_id, action, old_value, new_value, timestamp))
+
+
+def create_scenario(name: str, description: str = "", is_default: int = 0) -> int:
+    """Create a new scenario and return its ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    now = datetime.now().isoformat()
+    
+    try:
+        # If setting as default, unset other defaults first
+        if is_default:
+            cursor.execute("UPDATE scenarios SET is_default = 0")
+        
+        cursor.execute("""
+            INSERT INTO scenarios (name, description, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, description, is_default, now, now))
+        
+        scenario_id = cursor.lastrowid
+        
+        # Log the creation
+        log_audit(cursor, "scenario", scenario_id, "created", None, json.dumps({"name": name, "description": description}), now)
+        
+        conn.commit()
+        conn.close()
+        return scenario_id
+    except sqlite3.IntegrityError:
+        conn.close()
+        return -1
+
+
+def update_scenario(scenario_id: int, name: str, description: str = "", is_default: int = 0):
+    """Update a scenario."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get old values for audit
+    cursor.execute("SELECT name, description, is_default FROM scenarios WHERE id = ?", (scenario_id,))
+    old_data = cursor.fetchone()
+    
+    now = datetime.now().isoformat()
+    
+    try:
+        # If setting as default, unset other defaults first
+        if is_default:
+            cursor.execute("UPDATE scenarios SET is_default = 0")
+        
+        cursor.execute("""
+            UPDATE scenarios
+            SET name = ?, description = ?, is_default = ?, updated_at = ?
+            WHERE id = ?
+        """, (name, description, is_default, now, scenario_id))
+        
+        # Log the update
+        if old_data:
+            old_value = json.dumps({"name": old_data[0], "description": old_data[1], "is_default": old_data[2]})
+            new_value = json.dumps({"name": name, "description": description, "is_default": is_default})
+            log_audit(cursor, "scenario", scenario_id, "updated", old_value, new_value, now)
+        
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def delete_scenario(scenario_id: int):
+    """Delete a scenario if it's not used in any projects."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if scenario is used in any projects
+    cursor.execute("SELECT name FROM scenarios WHERE id = ?", (scenario_id,))
+    scenario = cursor.fetchone()
+    
+    if not scenario:
+        conn.close()
+        return False, "Scenariusz nie istnieje"
+    
+    scenario_name = scenario[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM projects WHERE scenario = ?", (scenario_name,))
+    count = cursor.fetchone()[0]
+    
+    if count > 0:
+        conn.close()
+        return False, f"Nie można usunąć scenariusza używanego w {count} projektach"
+    
+    # Get scenario data for audit
+    cursor.execute("SELECT name, description FROM scenarios WHERE id = ?", (scenario_id,))
+    old_data = cursor.fetchone()
+    
+    # Delete scenario shares first
+    cursor.execute("DELETE FROM scenario_shares WHERE scenario_id = ?", (scenario_id,))
+    
+    # Delete the scenario
+    cursor.execute("DELETE FROM scenarios WHERE id = ?", (scenario_id,))
+    
+    # Log the deletion
+    now = datetime.now().isoformat()
+    if old_data:
+        old_value = json.dumps({"name": old_data[0], "description": old_data[1]})
+        log_audit(cursor, "scenario", scenario_id, "deleted", old_value, None, now)
+    
+    conn.commit()
+    conn.close()
+    
+    return True, "Scenariusz usunięty pomyślnie"
+
+
+def get_all_scenarios() -> List[Tuple]:
+    """Get all scenarios."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, name, description, is_default, created_at, updated_at
+        FROM scenarios
+        ORDER BY is_default DESC, name ASC
+    """)
+    
+    scenarios = cursor.fetchall()
+    conn.close()
+    
+    return scenarios
+
+
+def get_scenario_by_id(scenario_id: int) -> Tuple:
+    """Get a specific scenario by ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, name, description, is_default, created_at, updated_at
+        FROM scenarios
+        WHERE id = ?
+    """, (scenario_id,))
+    
+    scenario = cursor.fetchone()
+    conn.close()
+    
+    return scenario
+
+
+def get_scenario_by_name(name: str) -> Tuple:
+    """Get a specific scenario by name."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, name, description, is_default, created_at, updated_at
+        FROM scenarios
+        WHERE name = ?
+    """, (name,))
+    
+    scenario = cursor.fetchone()
+    conn.close()
+    
+    return scenario
+
+
+def set_scenario_shares(scenario_id: int, shares: Dict[str, float]):
+    """Set shares for a scenario. Replaces existing shares."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get old shares for audit
+    cursor.execute("SELECT user_name, share_percentage FROM scenario_shares WHERE scenario_id = ?", (scenario_id,))
+    old_shares = {row[0]: row[1] for row in cursor.fetchall()}
+    
+    # Delete existing shares
+    cursor.execute("DELETE FROM scenario_shares WHERE scenario_id = ?", (scenario_id,))
+    
+    # Insert new shares
+    for user_name, share_pct in shares.items():
+        cursor.execute("""
+            INSERT INTO scenario_shares (scenario_id, user_name, share_percentage)
+            VALUES (?, ?, ?)
+        """, (scenario_id, user_name, share_pct))
+    
+    # Update scenario updated_at
+    now = datetime.now().isoformat()
+    cursor.execute("UPDATE scenarios SET updated_at = ? WHERE id = ?", (now, scenario_id))
+    
+    # Log the update
+    log_audit(cursor, "scenario_shares", scenario_id, "updated", json.dumps(old_shares), json.dumps(shares), now)
+    
+    conn.commit()
+    conn.close()
+
+
+def get_scenario_shares(scenario_id: int) -> Dict[str, float]:
+    """Get shares for a scenario."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT user_name, share_percentage
+        FROM scenario_shares
+        WHERE scenario_id = ?
+    """, (scenario_id,))
+    
+    shares = {row[0]: row[1] for row in cursor.fetchall()}
+    conn.close()
+    
+    return shares
+
+
+def validate_shares(shares: Dict[str, float]) -> Tuple[bool, str, float]:
+    """Validate that shares sum to 100%. Returns (is_valid, message, total)."""
+    total = sum(shares.values())
+    
+    if abs(total - 100.0) < 0.01:  # Allow small floating point errors
+        return True, "Suma udziałów wynosi 100%", total
+    elif total < 100.0:
+        diff = 100.0 - total
+        return False, f"Suma udziałów jest za mała o {diff:.2f}%", total
+    else:
+        diff = total - 100.0
+        return False, f"Suma udziałów jest za duża o {diff:.2f}%", total
+
+
+def get_audit_log(entity_type: str = None, entity_id: int = None, limit: int = 50) -> List[Tuple]:
+    """Get audit log entries."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    query = "SELECT id, entity_type, entity_id, action, old_value, new_value, created_at FROM audit_log"
+    params = []
+    
+    conditions = []
+    if entity_type:
+        conditions.append("entity_type = ?")
+        params.append(entity_type)
+    if entity_id is not None:
+        conditions.append("entity_id = ?")
+        params.append(entity_id)
+    
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    
+    cursor.execute(query, params)
+    logs = cursor.fetchall()
+    conn.close()
+    
+    return logs
+
+
+def export_scenarios_json() -> str:
+    """Export all scenarios to JSON format."""
+    scenarios = get_all_scenarios()
+    
+    export_data = []
+    for scenario in scenarios:
+        scenario_id, name, description, is_default, created_at, updated_at = scenario
+        shares = get_scenario_shares(scenario_id)
+        
+        export_data.append({
+            "name": name,
+            "description": description,
+            "is_default": bool(is_default),
+            "shares": shares
+        })
+    
+    return json.dumps(export_data, indent=2, ensure_ascii=False)
+
+
+def import_scenarios_json(json_data: str) -> Tuple[bool, str]:
+    """Import scenarios from JSON format."""
+    try:
+        scenarios_data = json.loads(json_data)
+        
+        imported_count = 0
+        for scenario_data in scenarios_data:
+            name = scenario_data.get("name")
+            description = scenario_data.get("description", "")
+            is_default = 1 if scenario_data.get("is_default", False) else 0
+            shares = scenario_data.get("shares", {})
+            
+            # Check if scenario already exists
+            existing = get_scenario_by_name(name)
+            
+            if existing:
+                # Update existing scenario
+                scenario_id = existing[0]
+                update_scenario(scenario_id, name, description, is_default)
+            else:
+                # Create new scenario
+                scenario_id = create_scenario(name, description, is_default)
+                
+                if scenario_id == -1:
+                    continue
+            
+            # Set shares
+            set_scenario_shares(scenario_id, shares)
+            imported_count += 1
+        
+        return True, f"Zaimportowano {imported_count} scenariuszy"
+    except Exception as e:
+        return False, f"Błąd importu: {str(e)}"
+
+
 def log_attendance(project_id: int, log_date: str, partner: str, present: int):
     """Rejestrowanie obecności partnera w określonym dniu. Ostatni zapis nadpisuje poprzedni."""
     conn = get_db_connection()
@@ -328,16 +721,16 @@ def calculate_payouts(project_id: int, partners: List[str]) -> Dict[str, any]:
     # Get worked days for each partner
     worked_days = get_worked_days_by_partner(project_id, partners)
     
-    # Get partner shares from database (or use scenario as fallback)
-    users_with_shares = get_all_users_with_shares()
+    # Get partner shares from scenario in database
+    scenario_data = get_scenario_by_name(scenario)
     partner_shares = {}
     
-    if users_with_shares:
+    if scenario_data:
         # Use dynamic shares from database
-        for user_name, user_share in users_with_shares:
-            partner_shares[user_name] = float(user_share)
+        scenario_id = scenario_data[0]
+        partner_shares = get_scenario_shares(scenario_id)
     else:
-        # Fallback to scenario shares if no users defined
+        # Fallback to hardcoded scenarios if scenario not found in database (backward compatibility)
         shares = SCENARIOS.get(scenario, {})
         partner_shares = shares
     
@@ -479,7 +872,7 @@ def main():
     partners = get_all_users()
     
     # Create tabs for main sections
-    tab_projects, tab_users = st.tabs(["Projekty", "Zarządzanie Użytkownikami"])
+    tab_projects, tab_scenarios, tab_users = st.tabs(["Projekty", "Zarządzanie Scenariuszami", "Zarządzanie Użytkownikami"])
     
     with tab_users:
         st.header("👥 Zarządzanie Użytkownikami/Partnerami")
@@ -533,6 +926,209 @@ def main():
             else:
                 st.info("Brak zdefiniowanych partnerów. Dodaj pierwszego!")
     
+    with tab_scenarios:
+        st.header("🎯 Zarządzanie Scenariuszami")
+        
+        # Search and filter
+        col_search, col_new = st.columns([3, 1])
+        with col_search:
+            search_query = st.text_input("🔍 Szukaj scenariusza", placeholder="Wpisz nazwę scenariusza...", key="search_scenario")
+        with col_new:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            show_create = st.button("➕ Utwórz Nowy Scenariusz", use_container_width=True)
+        
+        # Create new scenario form
+        if show_create or ("show_create_scenario" in st.session_state and st.session_state.show_create_scenario):
+            st.session_state.show_create_scenario = show_create
+            
+            with st.expander("➕ Tworzenie Nowego Scenariusza", expanded=True):
+                with st.form("create_scenario_form"):
+                    new_scenario_name = st.text_input("Nazwa scenariusza *", placeholder="np. Scenariusz 4")
+                    new_scenario_desc = st.text_area("Opis", placeholder="Opcjonalny opis scenariusza")
+                    new_is_default = st.checkbox("Ustaw jako domyślny")
+                    
+                    st.subheader("Udziały partnerów")
+                    st.caption("Przypisz procenty do każdego partnera. Suma musi wynosić 100%.")
+                    
+                    new_shares = {}
+                    for partner in partners:
+                        share_val = st.number_input(f"{partner} (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.01, key=f"new_share_{partner}")
+                        new_shares[partner] = share_val
+                    
+                    # Show validation
+                    is_valid, msg, total = validate_shares(new_shares)
+                    if is_valid:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg} (Aktualna suma: {total:.2f}%)")
+                    
+                    col_submit, col_cancel = st.columns(2)
+                    with col_submit:
+                        if st.form_submit_button("💾 Utwórz Scenariusz", disabled=not is_valid):
+                            if new_scenario_name.strip():
+                                scenario_id = create_scenario(new_scenario_name.strip(), new_scenario_desc, 1 if new_is_default else 0)
+                                if scenario_id != -1:
+                                    set_scenario_shares(scenario_id, new_shares)
+                                    st.success(f"✅ Utworzono scenariusz '{new_scenario_name}'")
+                                    st.session_state.show_create_scenario = False
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Scenariusz o tej nazwie już istnieje")
+                            else:
+                                st.error("Proszę podać nazwę scenariusza")
+                    with col_cancel:
+                        if st.form_submit_button("❌ Anuluj"):
+                            st.session_state.show_create_scenario = False
+                            st.rerun()
+        
+        st.divider()
+        
+        # Display existing scenarios
+        st.subheader("📋 Istniejące Scenariusze")
+        
+        scenarios = get_all_scenarios()
+        
+        # Filter by search query
+        if search_query:
+            scenarios = [s for s in scenarios if search_query.lower() in s[1].lower()]
+        
+        if scenarios:
+            for scenario in scenarios:
+                scenario_id, scenario_name, description, is_default, created_at, updated_at = scenario
+                shares = get_scenario_shares(scenario_id)
+                
+                # Validate shares
+                is_valid, validation_msg, total = validate_shares(shares)
+                
+                # Display scenario card
+                default_badge = "⭐ " if is_default else ""
+                validation_icon = "✅" if is_valid else "⚠️"
+                
+                with st.expander(f"{default_badge}{scenario_name} {validation_icon}", expanded=False):
+                    col_info, col_viz = st.columns([1, 1])
+                    
+                    with col_info:
+                        st.write(f"**Opis:** {description if description else 'Brak opisu'}")
+                        st.write(f"**Status:** {validation_msg}")
+                        st.write(f"**Utworzono:** {created_at[:10]}")
+                        st.write(f"**Zaktualizowano:** {updated_at[:10]}")
+                        
+                        st.write("**Udziały:**")
+                        for partner, share in shares.items():
+                            st.write(f"  • {partner}: {share:.2f}%")
+                    
+                    with col_viz:
+                        # Pie chart visualization
+                        if shares:
+                            fig = px.pie(
+                                values=list(shares.values()),
+                                names=list(shares.keys()),
+                                title=f"Podział w {scenario_name}",
+                                hole=0.3
+                            )
+                            fig.update_traces(textposition='inside', textinfo='percent+label')
+                            st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.divider()
+                    
+                    # Edit form
+                    with st.form(f"edit_scenario_{scenario_id}"):
+                        st.subheader("✏️ Edytuj Scenariusz")
+                        
+                        edit_name = st.text_input("Nazwa", value=scenario_name, key=f"edit_name_{scenario_id}")
+                        edit_desc = st.text_area("Opis", value=description, key=f"edit_desc_{scenario_id}")
+                        edit_is_default = st.checkbox("Ustaw jako domyślny", value=bool(is_default), key=f"edit_default_{scenario_id}")
+                        
+                        st.subheader("Udziały partnerów")
+                        edit_shares = {}
+                        for partner in partners:
+                            current_share = shares.get(partner, 0.0)
+                            share_val = st.number_input(f"{partner} (%)", min_value=0.0, max_value=100.0, value=float(current_share), step=0.01, key=f"edit_share_{scenario_id}_{partner}")
+                            edit_shares[partner] = share_val
+                        
+                        # Show validation
+                        edit_is_valid, edit_msg, edit_total = validate_shares(edit_shares)
+                        if edit_is_valid:
+                            st.success(f"✅ {edit_msg}")
+                        else:
+                            st.warning(f"⚠️ {edit_msg} (Aktualna suma: {edit_total:.2f}%)")
+                        
+                        col_update, col_delete = st.columns(2)
+                        with col_update:
+                            if st.form_submit_button("💾 Zapisz Zmiany", disabled=not edit_is_valid):
+                                if update_scenario(scenario_id, edit_name.strip(), edit_desc, 1 if edit_is_default else 0):
+                                    set_scenario_shares(scenario_id, edit_shares)
+                                    st.success("✅ Scenariusz zaktualizowany!")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Błąd aktualizacji (może istnieć scenariusz o tej nazwie)")
+                        
+                        with col_delete:
+                            if st.form_submit_button("🗑️ Usuń Scenariusz", type="secondary"):
+                                success, message = delete_scenario(scenario_id)
+                                if success:
+                                    st.success(f"✅ {message}")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {message}")
+                    
+                    # Show audit log for this scenario
+                    with st.expander("📜 Historia Zmian"):
+                        audit_logs = get_audit_log(entity_type="scenario", entity_id=scenario_id, limit=20)
+                        share_logs = get_audit_log(entity_type="scenario_shares", entity_id=scenario_id, limit=20)
+                        
+                        all_logs = sorted(audit_logs + share_logs, key=lambda x: x[6], reverse=True)
+                        
+                        if all_logs:
+                            for log in all_logs:
+                                log_id, entity_type, entity_id, action, old_value, new_value, created_at = log
+                                st.caption(f"**{created_at[:19]}** - {action.upper()} ({entity_type})")
+                                if old_value:
+                                    st.caption(f"  Stara wartość: {old_value}")
+                                if new_value:
+                                    st.caption(f"  Nowa wartość: {new_value}")
+                        else:
+                            st.info("Brak historii zmian")
+        else:
+            if search_query:
+                st.info(f"Nie znaleziono scenariuszy pasujących do '{search_query}'")
+            else:
+                st.info("Brak scenariuszy. Utwórz pierwszy scenariusz powyżej!")
+        
+        st.divider()
+        
+        # Import/Export section
+        st.subheader("📤 Import/Export Scenariuszy")
+        
+        col_exp, col_imp = st.columns(2)
+        
+        with col_exp:
+            st.write("**Eksport do JSON**")
+            if st.button("📥 Generuj JSON", use_container_width=True):
+                json_data = export_scenarios_json()
+                st.download_button(
+                    label="📥 Pobierz JSON",
+                    data=json_data,
+                    file_name=f"scenariusze_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+        
+        with col_imp:
+            st.write("**Import z JSON**")
+            uploaded_file = st.file_uploader("Wybierz plik JSON", type=["json"], key="import_scenarios")
+            if uploaded_file is not None:
+                json_data = uploaded_file.read().decode("utf-8")
+                if st.button("📤 Importuj", use_container_width=True):
+                    success, message = import_scenarios_json(json_data)
+                    if success:
+                        st.success(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+    
+    
     with tab_projects:
         # Sidebar for project management
         with st.sidebar:
@@ -544,11 +1140,27 @@ def main():
                     proj_name = st.text_input("Nazwa Projektu", placeholder="Wprowadź nazwę projektu")
                     proj_date = st.date_input("Data Projektu", value=date.today())
                     
-                    scenario = st.selectbox("Scenariusz", options=list(SCENARIOS.keys()))
+                    # Get scenarios from database
+                    db_scenarios = get_all_scenarios()
+                    scenario_names = [s[1] for s in db_scenarios]
+                    
+                    # Fallback to hardcoded if no scenarios in database
+                    if not scenario_names:
+                        scenario_names = list(SCENARIOS.keys())
+                    
+                    scenario = st.selectbox("Scenariusz", options=scenario_names)
                     
                     # Show scenario details
                     st.caption(f"**{scenario} - Podział:**")
-                    for partner, share in SCENARIOS[scenario].items():
+                    
+                    # Get shares from database or fallback to hardcoded
+                    scenario_data = get_scenario_by_name(scenario)
+                    if scenario_data:
+                        shares = get_scenario_shares(scenario_data[0])
+                    else:
+                        shares = SCENARIOS.get(scenario, {})
+                    
+                    for partner, share in shares.items():
                         st.caption(f"  {partner}: {share}%")
                     
                     proj_value = st.number_input(f"Wartość Całkowita ({CURRENCY})", min_value=0.0, value=1000.0, step=100.0)
@@ -620,7 +1232,22 @@ def main():
                         with st.form("edit_project_form"):
                             edit_name = st.text_input("Nazwa projektu", value=proj_name)
                             edit_date = st.date_input("Data projektu", value=datetime.fromisoformat(proj_date).date())
-                            edit_scenario = st.selectbox("Scenariusz", options=list(SCENARIOS.keys()), index=list(SCENARIOS.keys()).index(scenario))
+                            
+                            # Get scenarios from database
+                            db_scenarios = get_all_scenarios()
+                            scenario_names = [s[1] for s in db_scenarios]
+                            
+                            # Fallback to hardcoded if no scenarios in database
+                            if not scenario_names:
+                                scenario_names = list(SCENARIOS.keys())
+                            
+                            # Find current scenario index
+                            try:
+                                scenario_idx = scenario_names.index(scenario)
+                            except ValueError:
+                                scenario_idx = 0
+                            
+                            edit_scenario = st.selectbox("Scenariusz", options=scenario_names, index=scenario_idx)
                             edit_value = st.number_input(f"Wartość całkowita ({CURRENCY})", min_value=0.0, value=float(value), step=100.0)
                             edit_days = st.number_input("Planowane dni", min_value=1, value=planned_days, step=1)
                             
